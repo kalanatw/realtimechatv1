@@ -36,6 +36,15 @@
                         <input class="form-check-input" type="checkbox" id="ttsSwitch" checked>
                         <label class="form-check-label" for="ttsSwitch">Use offline TTS (faster, but lower quality)</label>
                     </div>
+                    
+                    <div class="mt-2">
+                        <label for="ttsEngine" class="form-label">TTS Engine:</label>
+                        <select class="form-select" id="ttsEngine">
+                            <option value="pyttsx3">pyttsx3 (Default)</option>
+                            <option value="gtts">Google TTS (Online)</option>
+                            <option value="kokoro">Kokoro TTS (Higher Quality)</option>
+                        </select>
+                    </div>
                 </div>
                 
                 <div class="mt-3 small text-muted text-center">

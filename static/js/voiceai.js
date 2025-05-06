@@ -124,21 +124,34 @@ document.addEventListener('DOMContentLoaded', function() {
     
     /**
      * Calibrate background noise level before starting to listen
+     * with improved accuracy
      */
     function calibrateBackgroundNoise() {
         let calibrationCount = 0;
-        const maxCalibrationSamples = 30; // About 1 second of calibration
+        const maxCalibrationSamples = 45; // Increased from 30 to 45 for better calibration
         console.log('Calibrating background noise...');
+        
+        // Clear previous samples
+        calibrationSamples = [];
+        
         const calibrationInterval = setInterval(() => {
             if (calibrationCount >= maxCalibrationSamples) {
                 clearInterval(calibrationInterval);
                 
+                // Sort samples to filter out outliers
+                calibrationSamples.sort((a, b) => a - b);
+                
+                // Remove outliers (top and bottom 15%)
+                const trimStart = Math.floor(calibrationSamples.length * 0.15);
+                const trimEnd = Math.floor(calibrationSamples.length * 0.85);
+                const trimmedSamples = calibrationSamples.slice(trimStart, trimEnd);
+                
                 // Calculate the average background noise level
-                backgroundNoiseLevel = calibrationSamples.reduce((a, b) => a + b, 0) / calibrationSamples.length;
+                backgroundNoiseLevel = trimmedSamples.reduce((a, b) => a + b, 0) / trimmedSamples.length;
                 console.log('Background noise level calibrated:', backgroundNoiseLevel);
                 
-                // Add a small buffer to avoid false triggers
-                backgroundNoiseLevel += 2;
+                // Add a larger buffer to avoid false triggers
+                backgroundNoiseLevel += 5; // Increased from 2 to 5
                 
                 isCalibrated = true;
                 
@@ -166,7 +179,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // Create an analyser to analyze audio levels
         analyser = audioContext.createAnalyser();
         analyser.fftSize = 1024; // Increased for better frequency resolution
-        analyser.smoothingTimeConstant = 0.2; // Reduced for faster response to speech
+        analyser.smoothingTimeConstant = 0.3; // Increased for more stable detection (was 0.2)
         
         // Connect the source to the analyser
         source.connect(analyser);
@@ -176,9 +189,14 @@ document.addEventListener('DOMContentLoaded', function() {
         analyser.connect(scriptProcessor);
         scriptProcessor.connect(audioContext.destination);
         
+        // Add debounce for speech detection to prevent rapid toggling
+        let lastSpeechState = false;
+        let speechStateCounter = 0;
+        let silenceStateCounter = 0;
+        const STATE_CHANGE_THRESHOLD = 5; // Require more consecutive frames to change state
+        
         // Set up processing to detect voice activity
         scriptProcessor.onaudioprocess = function() {
-            console.log('onaudioprocess running');
             // Always analyze audio for voice activity
             const array = new Uint8Array(analyser.frequencyBinCount);
             analyser.getByteFrequencyData(array);
@@ -189,33 +207,40 @@ document.addEventListener('DOMContentLoaded', function() {
             // Get speech frequency signature (human voice is typically 85-255 Hz)
             const voiceFrequencySignature = getVoiceFrequencySignature(array);
             
-            // Debug logs for audio processing
-            console.log('Audio process: avg', average, 'bgNoise', backgroundNoiseLevel, 'voiceSig', voiceFrequencySignature, 'isRecording', isRecording, 'isListening', isListening);
+            // Debug logs (uncomment if needed)
+            // console.log('Audio process: avg', average, 'bgNoise', backgroundNoiseLevel, 'voiceSig', voiceFrequencySignature, 'isRecording', isRecording, 'isListening', isListening);
             
             // For visualization
             if (isRecording) {
                 updateVolumeIndicator(average);
             }
             
+            // Is the current audio above background noise and has speech frequencies?
+            const isSpeakingNow = (average > backgroundNoiseLevel + 10) && (voiceFrequencySignature > 0.3);
+            
             // If we're recording, handle silence detection
             if (isRecording) {
-                // Is the current audio above background noise and has speech frequencies?
-                const isSpeakingNow = (average > backgroundNoiseLevel + 5) && (voiceFrequencySignature > 0.3);
-                
                 if (isSpeakingNow) {
                     // Reset silence detection
                     if (silenceTimer !== null) {
                         clearTimeout(silenceTimer);
                         silenceTimer = null;
                     }
-                    consecutiveSilenceCount = 0;
-                } else {
-                    // Count consecutive silence frames
-                    consecutiveSilenceCount++;
                     
-                    // Only trigger silence timeout if we've had multiple silent frames
-                    // This helps with momentary gaps in speech
-                    if (consecutiveSilenceCount > 15 && !silenceTimer) {
+                    // Reset silence counter but with debounce
+                    silenceStateCounter = 0;
+                    
+                    // Increment speech counter to prevent premature cutoffs during pauses
+                    speechStateCounter = Math.min(speechStateCounter + 1, 30); // Cap at 30
+                } else {
+                    // Count consecutive silence frames with debounce
+                    silenceStateCounter++;
+                    speechStateCounter = Math.max(speechStateCounter - 1, 0);
+                    
+                    // Only trigger silence timeout if we've had significant silent frames
+                    // and speech counter is low (meaning we're not in the middle of a speech)
+                    if (silenceStateCounter > 25 && speechStateCounter < 5 && !silenceTimer) {
+                        // Increased from 15 to 25 frames to allow longer natural pauses
                         silenceTimer = setTimeout(() => {
                             if (isRecording) {
                                 console.log('Silence detected, stopping recording');
@@ -225,42 +250,56 @@ document.addEventListener('DOMContentLoaded', function() {
                     }
                 }
             } 
-            // If we're not recording but listening, detect when to start
+            // If we're not recording but listening, detect when to start with debounce
             else if (isListening && !isSpeaking && !isProcessingRequest) {
-                // Is this audio likely to be speech?
-                console.log('Detection check: avg', average, 'bgNoise', backgroundNoiseLevel, 'voiceSig', voiceFrequencySignature);
-                const isProbablySpeech = (average > backgroundNoiseLevel + 1) && (voiceFrequencySignature > 0.1);
-                if (isProbablySpeech) {
-                    speakingTriggerCount++;
-                    if (speakingTriggerCount >= 2) { // Lowered to 2 frames for faster trigger
-                        console.log('Speech detected, starting recording. Volume:', average, 'Voice signature:', voiceFrequencySignature);
-                        startRecording();
-                        speakingTriggerCount = 0;
+                if (isSpeakingNow) {
+                    speechStateCounter++;
+                    
+                    // Require more consecutive speech frames for a more reliable trigger
+                    if (speechStateCounter >= 3) { // Changed from 2 to 3 for more reliability
+                        if (!lastSpeechState) {
+                            console.log('Speech detected, starting recording. Volume:', average, 'Voice signature:', voiceFrequencySignature);
+                            lastSpeechState = true;
+                            startRecording();
+                        }
                     }
                 } else {
-                    speakingTriggerCount = 0;
+                    speechStateCounter = Math.max(speechStateCounter - 1, 0);
+                    
+                    // Only change state after consecutive non-speech frames
+                    if (speechStateCounter === 0 && lastSpeechState) {
+                        lastSpeechState = false;
+                    }
                 }
             }
         };
     }
     
     /**
-     * Calculate average volume from frequency data
+     * Calculate average volume from frequency data with outlier rejection
      */
     function getAverageVolume(array) {
-        let values = 0;
+        let values = [];
         const length = array.length;
         
         // Use the frequency data to calculate volume
         for (let i = 0; i < length; i++) {
-            values += array[i];
+            values.push(array[i]);
         }
         
-        return values / length;
+        // Sort values and remove extreme outliers
+        values.sort((a, b) => a - b);
+        const trimLength = Math.floor(length * 0.1); // Trim 10% from each end
+        const trimmedValues = values.slice(trimLength, length - trimLength);
+        
+        // Calculate average of trimmed values
+        const sum = trimmedValues.reduce((a, b) => a + b, 0);
+        return sum / trimmedValues.length;
     }
     
     /**
      * Extract the voice frequency signature to better distinguish speech from noise
+     * with enhanced detection
      */
     function getVoiceFrequencySignature(frequencyData) {
         // Human voice typically falls between 85-255 Hz
@@ -276,18 +315,26 @@ document.addEventListener('DOMContentLoaded', function() {
         
         // Sum all frequency energies for comparison
         for (let i = 0; i < frequencyData.length; i++) {
-            totalSum += frequencyData[i];
+            const binValue = frequencyData[i];
+            totalSum += binValue;
             
             // Calculate the frequency of this bin
             const frequency = i * binSize;
             
             // Check if this frequency is in the human voice range (85-255 Hz)
+            // Give higher weight to the core speech frequencies
             if (frequency >= 85 && frequency <= 255) {
-                voiceSum += frequencyData[i];
+                // Core speech frequencies get more weight
+                voiceSum += binValue * 1.5;
+            }
+            
+            // Add some weight to formant frequencies (up to 3000 Hz)
+            else if (frequency > 255 && frequency <= 3000) {
+                voiceSum += binValue * 0.5;
             }
         }
         
-        // Return the ratio of voice frequencies to all frequencies
+        // Return the weighted ratio of voice frequencies to all frequencies
         return voiceSum / totalSum;
     }
     
@@ -346,31 +393,47 @@ document.addEventListener('DOMContentLoaded', function() {
     
     /**
      * Start the recording process
+     * with optimized responsiveness
      */
     function startRecording() {
-        if (isRecording || isProcessingRequest) return; // Prevent duplicate starts and only start if no request is in progress
+        if (isRecording || isProcessingRequest) return; // Prevent duplicate starts
+        
+        // Add extra check to ensure we don't start recording if processing is happening
+        if (isProcessingRequest) {
+            console.log('Cannot start recording while processing a request');
+            return;
+        }
         
         isRecording = true;
         audioChunks = [];
         
-        // Start with a 10ms timeslice to get data chunks more frequently
-        mediaRecorder.start(10);
-        
-        // Update UI for recording state
-        recordButton.innerHTML = '<i class="fas fa-stop"></i>';
-        recordButton.classList.remove('btn-primary');
-        recordButton.classList.add('btn-warning', 'recording-active');
-        document.body.classList.add('recording');
-        statusIndicator.textContent = 'Recording...';
-        
-        // Reset silence detection
-        if (silenceTimer) {
-            clearTimeout(silenceTimer);
-            silenceTimer = null;
-        }
-        
-        // Reset silence counter
-        consecutiveSilenceCount = 0;
+        // Use a shorter delay to start recording faster
+        setTimeout(() => {
+            try {
+                // Use a larger timeslice for better audio quality with less overhead
+                mediaRecorder.start(100); // Changed from 10ms to 100ms
+                
+                // Update UI for recording state
+                recordButton.innerHTML = '<i class="fas fa-stop"></i>';
+                recordButton.classList.remove('btn-primary');
+                recordButton.classList.add('btn-warning', 'recording-active');
+                document.body.classList.add('recording');
+                statusIndicator.textContent = 'Recording...';
+                
+                // Reset silence detection
+                if (silenceTimer) {
+                    clearTimeout(silenceTimer);
+                    silenceTimer = null;
+                }
+                
+                // Reset counters
+                consecutiveSilenceCount = 0;
+            } catch (e) {
+                console.error('Failed to start recording:', e);
+                isRecording = false;
+                statusIndicator.textContent = 'Failed to start recording. Please try again.';
+            }
+        }, 100); // Reduced from 200ms to 100ms for faster response
     }
     
     /**
@@ -404,15 +467,24 @@ document.addEventListener('DOMContentLoaded', function() {
 
     /**
      * Send the recorded audio to the server for processing
+     * with optimized streaming response handling
      */
     function sendAudioToServer(audioBlob) {
         latestRequestId += 1;
         const thisRequestId = latestRequestId;
         isProcessingRequest = true; // Set flag to indicate request is in progress
+        
         // Create FormData to send the audio file
         const formData = new FormData();
         formData.append('audio', audioBlob, 'recording.webm');
         formData.append('use_offline_tts', ttsSwitch.checked);
+        
+        // Add TTS engine selection
+        const ttsEngine = document.getElementById('ttsEngine').value;
+        formData.append('tts_engine', ttsEngine);
+        
+        // Request streaming response for faster feedback
+        formData.append('stream_response', 'true');
         
         // Add conversation ID if we have one to maintain context
         if (currentConversationId) {
@@ -424,6 +496,9 @@ document.addEventListener('DOMContentLoaded', function() {
         
         // Display user's audio bubble with loading state
         addMessageBubble('user', '...', true);
+        
+        // Record start time to measure performance
+        const requestStartTime = performance.now();
         
         // Send to server
         fetch('/api/converse/', {
@@ -438,49 +513,62 @@ document.addEventListener('DOMContentLoaded', function() {
         })
         .then(data => {
             if (data.success) {
+                // Measure response time
+                const responseTime = ((performance.now() - requestStartTime) / 1000).toFixed(2);
+                console.log(`Server response received in ${responseTime}s`);
+                
                 // Only update UI if this is the latest request
                 if (thisRequestId === latestRequestId) {
                     // Update the user's message with the transcription
                     updateLastUserBubble(data.transcribed_text);
                     
-                    // Show AI is thinking
-                    const aiThinkingBubble = addMessageBubble('ai', '...', true);
+                    // Add the AI's response immediately
+                    const responseBubble = addMessageBubble('ai', data.ai_response);
                     
-                    // Add the AI's response after a small delay to simulate thinking
-                    setTimeout(() => {
-                        // Remove the thinking bubble
-                        aiThinkingBubble.remove();
+                    // Begin playing the audio as soon as possible
+                    if (data.audio_url) {
+                        // Play with progressive loading
+                        const audio = new Audio();
+                        audio.src = data.audio_url;
                         
-                        // Add the actual response
-                        addMessageBubble('ai', data.ai_response);
+                        // Track when playback starts
+                        const playbackStartTime = performance.now();
+                        audio.oncanplaythrough = function() {
+                            const loadTime = ((performance.now() - playbackStartTime) / 1000).toFixed(2);
+                            console.log(`Audio ready to play after ${loadTime}s`);
+                        };
                         
-                        // Play the audio response
-                        playAudioResponse(data.audio_url);
-                        
-                        // Save the conversation ID for context in future exchanges
-                        if (data.conversation_id) {
-                            currentConversationId = data.conversation_id;
-                            console.log('Conversation ID updated:', currentConversationId);
-                        }
-                        
-                        // Show what tool was used if applicable
-                        if (data.tool_used) {
-                            const toolIndicator = document.createElement('div');
-                            toolIndicator.classList.add('tool-indicator');
-                            toolIndicator.innerHTML = `<small class="text-info"><i class="fas fa-tools"></i> Used: ${data.tool_used}</small>`;
-                            conversationContainer.appendChild(toolIndicator);
-                            conversationContainer.scrollTop = conversationContainer.scrollHeight;
-                        }
-                        
-                        // Show processing time
-                        if (data.processing_time) {
-                            statusIndicator.textContent = `Response took ${data.processing_time}s`;
-                        }
-                        
-                        // Update topics list
-                        updateTopicsList(data.ai_response);
-                    }, 600); // Simulate a brief thinking time for more natural conversation flow
+                        playAudioResponse(audio);
+                    }
                     
+                    // Save the conversation ID for context in future exchanges
+                    if (data.conversation_id) {
+                        currentConversationId = data.conversation_id;
+                        console.log('Conversation ID updated:', currentConversationId);
+                    }
+                    
+                    // Show what tool was used if applicable
+                    if (data.tool_used) {
+                        const toolIndicator = document.createElement('div');
+                        toolIndicator.classList.add('tool-indicator');
+                        toolIndicator.innerHTML = `<small class="text-info"><i class="fas fa-tools"></i> Used: ${data.tool_used}</small>`;
+                        conversationContainer.appendChild(toolIndicator);
+                        conversationContainer.scrollTop = conversationContainer.scrollHeight;
+                    }
+                    
+                    // Show processing time
+                    if (data.processing_time) {
+                        statusIndicator.textContent = `Response took ${data.processing_time}s`;
+                        
+                        // Add performance monitoring in the UI
+                        if (responseTime > 0 && data.processing_time > 0) {
+                            const clientDelay = (responseTime - data.processing_time).toFixed(2);
+                            console.log(`Client-side delay: ${clientDelay}s`);
+                        }
+                    }
+                    
+                    // Update topics list
+                    updateTopicsList(data.ai_response);
                 } else {
                     // Ignore outdated responses
                     console.log('Ignored outdated response', thisRequestId);
@@ -511,7 +599,7 @@ document.addEventListener('DOMContentLoaded', function() {
             isProcessingRequest = false; // Reset flag when request is complete
         });
     }
-    
+
     /**
      * Add a message bubble to the conversation container
      */
@@ -578,15 +666,28 @@ document.addEventListener('DOMContentLoaded', function() {
     
     /**
      * Play the audio response from the server and handle state
+     * with optimized playback
      */
-    function playAudioResponse(audioUrl) {
+    function playAudioResponse(audioOrUrl) {
         // Set speaking state to true
         isSpeaking = true;
         statusIndicator.textContent = 'AI is speaking...';
         
-        // Create and configure audio element
-        const audio = new Audio(audioUrl);
+        // Configure audio element
+        let audio;
+        if (typeof audioOrUrl === 'string') {
+            // Create new Audio element if we received a URL
+            audio = new Audio(audioOrUrl);
+        } else {
+            // Use the provided Audio element
+            audio = audioOrUrl;
+        }
+        
         currentAudio = audio;
+        
+        // Use lower audio buffer size for faster startup
+        audio.preload = 'auto';
+        audio.autoplay = true;
         
         // When audio ends, resume listening immediately
         audio.onended = function() {
@@ -594,10 +695,6 @@ document.addEventListener('DOMContentLoaded', function() {
             currentAudio = null;
             statusIndicator.textContent = 'Listening for your voice...';
             console.log('AI response finished, listening for user input');
-            
-            // Remove any existing continue buttons if present
-            const continueButtons = document.querySelectorAll('.continue-button');
-            continueButtons.forEach(button => button.remove());
             
             // Recalibrate the background noise level to adapt to changing environments
             recalibrateBackgroundNoise();
@@ -617,18 +714,27 @@ document.addEventListener('DOMContentLoaded', function() {
         };
         
         // Play the audio
-        audio.play()
-            .catch(error => {
-                console.error('Error playing audio:', error);
-                isSpeaking = false;
-                currentAudio = null;
-                statusIndicator.textContent = 'Listening for your voice...';
-                
-                // Ensure we're in auto-listening mode even if audio fails to play
-                if (!isListening) {
-                    startAutoListeningMode();
-                }
-            });
+        try {
+            const playPromise = audio.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(error => {
+                    console.error('Error playing audio:', error);
+                    isSpeaking = false;
+                    currentAudio = null;
+                    statusIndicator.textContent = 'Listening for your voice...';
+                    
+                    // Ensure we're in auto-listening mode even if audio fails to play
+                    if (!isListening) {
+                        startAutoListeningMode();
+                    }
+                });
+            }
+        } catch (error) {
+            console.error('Error during audio playback:', error);
+            isSpeaking = false;
+            currentAudio = null;
+            statusIndicator.textContent = 'Listening for your voice...';
+        }
     }
     
     /**
@@ -755,3 +861,304 @@ document.addEventListener('DOMContentLoaded', function() {
     // Initial conversation greeting
     addMessageBubble('ai', 'How can I help you today? I\'m listening for your voice.');
 });
+
+/**
+ * Audio queue for progressive playback of TTS segments
+ */
+class AudioQueue {
+    constructor() {
+        this.queue = [];
+        this.isPlaying = false;
+        this.currentAudio = null;
+        this.onComplete = null;
+        this.segmentsPlayed = 0;
+        this.totalSegments = 0;
+    }
+    
+    addSegment(audioData) {
+        // Convert binary data to a playable audio element
+        const blob = new Blob([audioData], { type: 'audio/wav' });
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        
+        // Add to queue
+        this.queue.push({
+            audio: audio,
+            url: url
+        });
+        
+        // Start playback if not already playing
+        if (!this.isPlaying) {
+            this.playNext();
+        }
+    }
+    
+    playNext() {
+        if (this.queue.length === 0) {
+            this.isPlaying = false;
+            
+            // Execute completion callback if defined
+            if (typeof this.onComplete === 'function') {
+                this.onComplete();
+            }
+            return;
+        }
+        
+        this.isPlaying = true;
+        const segment = this.queue.shift();
+        this.currentAudio = segment.audio;
+        
+        // Configure audio element
+        this.currentAudio.onended = () => {
+            // Clean up resources
+            URL.revokeObjectURL(segment.url);
+            this.segmentsPlayed++;
+            
+            // Play the next segment
+            this.playNext();
+        };
+        
+        // Handle errors
+        this.currentAudio.onerror = (e) => {
+            console.error("Error playing audio segment:", e);
+            URL.revokeObjectURL(segment.url);
+            this.playNext(); // Skip to next segment
+        };
+        
+        // Play this segment
+        this.currentAudio.play().catch(error => {
+            console.error("Error starting audio playback:", error);
+            this.playNext(); // Try the next segment
+        });
+    }
+    
+    stop() {
+        if (this.currentAudio) {
+            this.currentAudio.pause();
+            this.currentAudio = null;
+        }
+        
+        // Clean up all queued segments
+        this.queue.forEach(segment => {
+            URL.revokeObjectURL(segment.url);
+        });
+        
+        this.queue = [];
+        this.isPlaying = false;
+    }
+    
+    setTotalSegments(count) {
+        this.totalSegments = count;
+    }
+    
+    getProgress() {
+        if (this.totalSegments === 0) return 0;
+        return (this.segmentsPlayed / this.totalSegments) * 100;
+    }
+}
+
+// Create a global audio queue for streaming playback
+const audioQueue = new AudioQueue();
+
+/**
+ * Send the recorded audio to the server for processing
+ * with progressive streaming response
+ */
+function sendAudioToServer(audioBlob) {
+    latestRequestId += 1;
+    const thisRequestId = latestRequestId;
+    isProcessingRequest = true;
+    
+    // Create FormData to send the audio file
+    const formData = new FormData();
+    formData.append('audio', audioBlob, 'recording.webm');
+    formData.append('use_offline_tts', ttsSwitch.checked);
+    
+    // Add TTS engine selection
+    const ttsEngine = document.getElementById('ttsEngine').value;
+    formData.append('tts_engine', ttsEngine);
+    
+    // Add conversation ID if we have one to maintain context
+    if (currentConversationId) {
+        formData.append('conversation_id', currentConversationId);
+        console.log('Continuing conversation:', currentConversationId);
+    } else {
+        console.log('Starting new conversation');
+    }
+    
+    // Display user's audio bubble with loading state
+    addMessageBubble('user', '...', true);
+    
+    // Use the streaming endpoint for progressive output
+    fetch('/api/converse_stream/', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => {
+        if (!response.ok) {
+            throw new Error('Network response was not ok');
+        }
+        
+        // Set up streaming response handling
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let streamMode = 'json'; // Start in JSON mode
+        let expectedSize = 0;
+        let binaryChunk = new Uint8Array(0);
+        
+        // Create a progressive bubble for the AI response
+        const aiThinkingBubble = addMessageBubble('ai', 'Processing...', true);
+        let responseBubble = null;
+        
+        // Reset and prepare audio queue
+        audioQueue.stop();
+        audioQueue.onComplete = function() {
+            // Cleanup after all audio has played
+            isSpeaking = false;
+            currentAudio = null;
+            statusIndicator.textContent = 'Listening for your voice...';
+            console.log('AI response audio complete, listening for user input');
+            
+            // Recalibrate the background noise level
+            recalibrateBackgroundNoise();
+        };
+        
+        // Status indicators
+        let messageTextReceived = false;
+        let segmentsReceived = 0;
+        let totalSegments = 0;
+        
+        // Process the stream
+        function processStream() {
+            return reader.read().then(({ done, value }) => {
+                if (done) {
+                    console.log("Stream complete");
+                    aiThinkingBubble.remove();
+                    isProcessingRequest = false;
+                    return;
+                }
+                
+                // Process the chunk
+                const chunk = value;
+                
+                if (streamMode === 'json') {
+                    // We're expecting JSON data
+                    buffer += decoder.decode(chunk, { stream: true });
+                    
+                    // Process any complete JSON messages in the buffer
+                    let newlineIndex;
+                    while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+                        const line = buffer.substring(0, newlineIndex);
+                        buffer = buffer.substring(newlineIndex + 1);
+                        
+                        if (line.trim()) {
+                            try {
+                                const data = JSON.parse(line);
+                                
+                                // Handle initial response data
+                                if (!messageTextReceived && data.ai_response) {
+                                    // AI response text received - update UI
+                                    messageTextReceived = true;
+                                    aiThinkingBubble.remove();
+                                    
+                                    // Create the permanent response bubble
+                                    responseBubble = addMessageBubble('ai', data.ai_response);
+                                    
+                                    // Update transcription
+                                    updateLastUserBubble(data.transcribed_text);
+                                    
+                                    // Save conversation ID
+                                    if (data.conversation_id) {
+                                        currentConversationId = data.conversation_id;
+                                    }
+                                    
+                                    // Show tool usage if applicable
+                                    if (data.tool_used) {
+                                        const toolIndicator = document.createElement('div');
+                                        toolIndicator.classList.add('tool-indicator');
+                                        toolIndicator.innerHTML = `<small class="text-info"><i class="fas fa-tools"></i> Used: ${data.tool_used}</small>`;
+                                        conversationContainer.appendChild(toolIndicator);
+                                        conversationContainer.scrollTop = conversationContainer.scrollHeight;
+                                    }
+                                    
+                                    // Set the total segments expected
+                                    if (data.segments_count) {
+                                        totalSegments = data.segments_count;
+                                        audioQueue.setTotalSegments(totalSegments);
+                                    }
+                                    
+                                    // Begin audio playback mode
+                                    isSpeaking = true;
+                                    statusIndicator.textContent = 'AI is speaking...';
+                                    
+                                } else if (data.segment !== undefined) {
+                                    // This is segment metadata - prepare for binary audio data
+                                    console.log(`Received segment ${data.segment}: ${data.text.substring(0, 20)}...`);
+                                    segmentsReceived++;
+                                    
+                                    // Show progress
+                                    const progressPercent = totalSegments > 0 ? 
+                                        Math.round((segmentsReceived / totalSegments) * 100) : 0;
+                                    statusIndicator.textContent = `AI is speaking... (${progressPercent}%)`;
+                                    
+                                    // Switch to binary mode for the next chunk
+                                    streamMode = 'binary';
+                                    expectedSize = data.size;
+                                    binaryChunk = new Uint8Array(0);
+                                    
+                                } else if (data.complete) {
+                                    // All segments received
+                                    console.log(`Audio streaming complete: ${data.total_segments} segments in ${data.processing_time}s`);
+                                }
+                            } catch (e) {
+                                console.error("Error parsing JSON from stream:", e, line);
+                            }
+                        }
+                    }
+                } else if (streamMode === 'binary') {
+                    // We're receiving binary audio data
+                    // Append to our binary chunk
+                    const newChunk = new Uint8Array(binaryChunk.length + chunk.length);
+                    newChunk.set(binaryChunk);
+                    newChunk.set(chunk, binaryChunk.length);
+                    binaryChunk = newChunk;
+                    
+                    // Check if we've received all expected bytes plus newline
+                    if (binaryChunk.length >= expectedSize + 1) {
+                        // Extract the audio data (excluding the trailing newline)
+                        const audioData = binaryChunk.slice(0, expectedSize);
+                        
+                        // Add this segment to the audio queue for playback
+                        audioQueue.addSegment(audioData);
+                        
+                        // Any remaining data goes back to buffer for JSON parsing
+                        const remainingData = binaryChunk.slice(expectedSize + 1); // +1 to skip newline
+                        buffer = decoder.decode(remainingData, { stream: true });
+                        
+                        // Switch back to JSON mode for next segment metadata
+                        streamMode = 'json';
+                    }
+                }
+                
+                // Continue processing the stream
+                return processStream();
+            });
+        }
+        
+        // Start processing the stream
+        return processStream();
+    })
+    .catch(error => {
+        console.error('Error sending audio to server:', error);
+        statusIndicator.textContent = 'Error: Failed to process your message.';
+        statusIndicator.classList.add('text-danger');
+        
+        // Resume listening after error
+        setTimeout(() => {
+            statusIndicator.textContent = 'Listening...';
+            statusIndicator.classList.remove('text-danger');
+            isProcessingRequest = false;
+        }, 3000);
+    });
+}

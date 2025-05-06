@@ -6,7 +6,7 @@ RealTalk is a Django-based voice conversation application that provides a seamle
 
 - **Speech-to-Text**: Uses OpenAI's Whisper model for accurate speech transcription
 - **Natural Language Processing**: Processes text with OpenAI's gpt-4o-mini model
-- **Text-to-Speech**: Converts responses to natural-sounding speech (configurable between online and offline options)
+- **Text-to-Speech**: Converts responses to natural-sounding speech with multiple engine options
 - **Low Latency**: Optimized for minimal delay between speech and response
 - **Responsive UI**: Clean, mobile-friendly interface with conversation history
 
@@ -15,13 +15,17 @@ RealTalk is a Django-based voice conversation application that provides a seamle
 - **Backend**: Python 3.x, Django 5.x
 - **Frontend**: HTML5, CSS3, JavaScript (with Bootstrap 5)
 - **AI Services**: OpenAI API (Whisper for STT, gpt-4o-mini for NLP)
-- **Text-to-Speech**: pyttsx3 (offline), gTTS (online)
+- **Text-to-Speech Options**:
+  - Kokoro (high-quality, moderate latency)
+  - pyttsx3 (offline, low quality, lowest latency)
+  - gTTS (online, good quality, higher latency)
 
 ## Prerequisites
 
 - Python 3.8 or higher
 - OpenAI API key with access to Whisper and gpt-4o-mini models
 - Web browser with microphone access support
+- For Kokoro TTS: espeak-ng installed on your system
 
 ## Installation
 
@@ -47,36 +51,41 @@ pip install -r requirements.txt
 export OPENAI_API_KEY=your_api_key_here
 ```
 
-5. Apply database migrations:
+5. Set up Kokoro TTS (recommended for best quality):
+```bash
+python scripts/setup_kokoro.py
+```
+
+6. Apply database migrations:
 ```bash
 python manage.py migrate
 ```
 
-6. Create a superuser (optional, for admin access):
+7. Create a superuser (optional, for admin access):
 ```bash
 python manage.py createsuperuser
 ```
 
-7. Run the development server:
+8. Run the development server:
 ```bash
 python manage.py runserver
 ```
 
-8. Navigate to `http://127.0.0.1:8000` in your web browser.
+9. Navigate to `http://127.0.0.1:8000` in your web browser.
 
 ## Usage
 
-1. Click the microphone button to start recording.
-2. Speak clearly into your microphone.
-3. Click the button again to stop recording.
-4. Wait briefly while your speech is processed.
-5. Listen to the AI response.
+1. Click anywhere on the screen to start the voice assistant.
+2. Speak clearly into your microphone - the system automatically detects when you start and stop speaking.
+3. Wait briefly while your speech is processed.
+4. Listen to the AI response.
 
 ### TTS Options
 
-You can toggle between:
-- **Offline TTS** (pyttsx3): Faster but lower quality
-- **Online TTS** (gTTS): Higher quality but may have more latency
+You can choose between three TTS engines:
+- **Kokoro TTS**: High quality with moderate latency (default)
+- **Offline TTS** (pyttsx3): Lowest latency but lower quality
+- **Online TTS** (gTTS): Good quality but higher latency
 
 ## Environment Variables
 
@@ -140,3 +149,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - OpenAI for their Whisper and GPT models
 - The Django community for the excellent web framework
 - Contributors to pyttsx3 and gTTS for the TTS engines
+
+##initialize kokoro
+python /Users/kalana/Desktop/Personal/AgentProjects/RealTalk/scripts/setup_kokoro.py
