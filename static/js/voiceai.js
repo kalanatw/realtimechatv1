@@ -9,6 +9,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const ttsSwitch = document.getElementById('ttsSwitch');
     const topicsList = document.getElementById('topicsList');
     const topicsContainer = document.getElementById('topicsContainer');
+    const useWebSocketCheckbox = document.getElementById('useWebSocket');
     
     // Hide record and reset buttons for voice-only experience
     recordButton.style.display = 'none';
@@ -43,6 +44,10 @@ document.addEventListener('DOMContentLoaded', function() {
     // Conversation tracking for agent memory
     let currentConversationId = null;
     
+    // WebSocket client
+    let wsClient = null;
+    let usingWebSockets = false;
+    
     // Initialize audio context for playback and analysis
     audioContext = new (window.AudioContext || window.webkitAudioContext)();
     
@@ -70,13 +75,141 @@ document.addEventListener('DOMContentLoaded', function() {
         audioContext.resume().then(() => {
             console.log('AudioContext resumed after user gesture');
             initializeAudio();
+            
+            // Initialize WebSocket if enabled
+            if (useWebSocketCheckbox && useWebSocketCheckbox.checked) {
+                initializeWebSocket();
+            }
         });
     });
     
-    // Remove auto-initialization on page load
-    // initializeAudio();
+    // Add event listener for WebSocket toggle
+    if (useWebSocketCheckbox) {
+        useWebSocketCheckbox.addEventListener('change', function() {
+            const useWS = this.checked;
+            if (useWS && !wsClient) {
+                initializeWebSocket();
+            } else if (!useWS && wsClient) {
+                wsClient.disconnect();
+                wsClient = null;
+                usingWebSockets = false;
+                console.log('WebSocket connection disabled');
+            }
+        });
+    }
     
-    // Remove manual button event listeners (recordButton, resetButton)
+    /**
+     * Initialize WebSocket connection
+     */
+    function initializeWebSocket() {
+        if (window.VoiceWebSocketClient === undefined) {
+            console.error('VoiceWebSocketClient is not available. Make sure to include voiceai-websocket.js');
+            if (useWebSocketCheckbox) {
+                useWebSocketCheckbox.checked = false;
+            }
+            return;
+        }
+        
+        try {
+            // Get TTS preferences
+            const useOfflineTTS = ttsSwitch.checked;
+            const ttsEngine = document.getElementById('ttsEngine').value;
+            
+            // Initialize WebSocket client
+            wsClient = new VoiceWebSocketClient({
+                useStreaming: true, // Use streaming mode
+                useOfflineTTS: useOfflineTTS,
+                ttsEngine: ttsEngine,
+                
+                // Set up callbacks
+                onOpen: () => {
+                    usingWebSockets = true;
+                    console.log('WebSocket connection established');
+                    statusIndicator.textContent = 'WebSocket connected, listening for your voice...';
+                    
+                    // Set conversation ID if we have one
+                    if (currentConversationId) {
+                        wsClient.setConversationId(currentConversationId);
+                    }
+                },
+                
+                onClose: () => {
+                    usingWebSockets = false;
+                    console.log('WebSocket connection closed');
+                    
+                    // Only update status if not in middle of other operation
+                    if (!isProcessingRequest && !isRecording) {
+                        statusIndicator.textContent = 'WebSocket disconnected, using HTTP fallback...';
+                    }
+                },
+                
+                onError: (error) => {
+                    console.error('WebSocket error:', error);
+                    
+                    // Only update status if not in middle of other operation
+                    if (!isProcessingRequest && !isRecording) {
+                        statusIndicator.textContent = 'WebSocket error, using HTTP fallback...';
+                    }
+                    
+                    // Fallback to HTTP mode
+                    usingWebSockets = false;
+                },
+                
+                onTranscription: (text) => {
+                    // Update user bubble with transcription
+                    updateLastUserBubble(text);
+                },
+                
+                onAIResponse: (text, conversationId, toolUsed) => {
+                    // Add the AI response bubble
+                    const responseBubble = addMessageBubble('ai', text);
+                    
+                    // Update conversation ID
+                    if (conversationId) {
+                        currentConversationId = conversationId;
+                    }
+                    
+                    // Show tool usage if applicable
+                    if (toolUsed) {
+                        const toolIndicator = document.createElement('div');
+                        toolIndicator.classList.add('tool-indicator');
+                        toolIndicator.innerHTML = `<small class="text-info"><i class="fas fa-tools"></i> Used: ${toolUsed}</small>`;
+                        conversationContainer.appendChild(toolIndicator);
+                        conversationContainer.scrollTop = conversationContainer.scrollHeight;
+                    }
+                    
+                    // Update topics list
+                    updateTopicsList(text);
+                },
+                
+                onAudio: (audioUrl, audioBlob) => {
+                    // Play the audio response
+                    const audio = new Audio(audioUrl);
+                    playAudioResponse(audio);
+                },
+                
+                onTTSSegment: (audioData) => {
+                    // For streaming TTS, add to audio queue
+                    audioQueue.addSegment(audioData);
+                },
+                
+                onComplete: () => {
+                    // Update status
+                    statusIndicator.textContent = 'Listening for your voice...';
+                    isProcessingRequest = false;
+                }
+            });
+            
+            console.log('WebSocket client initialized');
+            
+        } catch (error) {
+            console.error('Error initializing WebSocket client:', error);
+            usingWebSockets = false;
+            if (useWebSocketCheckbox) {
+                useWebSocketCheckbox.checked = false;
+            }
+        }
+    }
     
     /**
      * Initialize audio recording capabilities with voice activity detection
@@ -384,8 +517,17 @@ document.addEventListener('DOMContentLoaded', function() {
         // Create a blob from the audio chunks
         const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
         
-        // Send the audio to the server
-        sendAudioToServer(audioBlob);
+        // If using WebSockets, send via WebSocket
+        if (usingWebSockets && wsClient && wsClient.isConnected) {
+            // Add a user message bubble with loading state
+            addMessageBubble('user', '...', true);
+            
+            // Send the audio via WebSocket
+            wsClient.sendAudio(audioBlob);
+        } else {
+            // Fall back to HTTP
+            sendAudioToServer(audioBlob);
+        }
         
         // Reset audio chunks for next recording
         audioChunks = [];
@@ -545,6 +687,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (data.conversation_id) {
                         currentConversationId = data.conversation_id;
                         console.log('Conversation ID updated:', currentConversationId);
+                        
+                        // Update the WebSocket client with the new conversation ID
+                        if (wsClient) {
+                            wsClient.setConversationId(currentConversationId);
+                        }
                     }
                     
                     // Show what tool was used if applicable
@@ -781,6 +928,11 @@ document.addEventListener('DOMContentLoaded', function() {
         currentConversationId = null;
         console.log('Conversation reset');
         
+        // Reset the WebSocket client's conversation ID
+        if (wsClient) {
+            wsClient.setConversationId(null);
+        }
+        
         // Stop any playing audio
         if (currentAudio) {
             currentAudio.pause();
@@ -856,6 +1008,36 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             });
         }
+    }
+
+    // Listen for reset button clicks
+    if (resetButton) {
+        resetButton.addEventListener('click', resetConversation);
+    }
+    
+    // Listen for TTS switch changes
+    if (ttsSwitch) {
+        ttsSwitch.addEventListener('change', function() {
+            // Update WebSocket client with new preference
+            if (wsClient) {
+                wsClient.options.useOfflineTTS = this.checked;
+                // Send updated metadata
+                wsClient.sendMetadata();
+            }
+        });
+    }
+    
+    // Listen for TTS engine changes
+    const ttsEngineSelect = document.getElementById('ttsEngine');
+    if (ttsEngineSelect) {
+        ttsEngineSelect.addEventListener('change', function() {
+            // Update WebSocket client with new preference
+            if (wsClient) {
+                wsClient.options.ttsEngine = this.value;
+                // Send updated metadata
+                wsClient.sendMetadata();
+            }
+        });
     }
 
     // Initial conversation greeting

@@ -45,6 +45,11 @@
                             <option value="kokoro">Kokoro TTS (Higher Quality)</option>
                         </select>
                     </div>
+
+                    <div class="form-check form-switch mt-3">
+                        <input class="form-check-input" type="checkbox" id="useWebSocket" checked>
+                        <label class="form-check-label" for="useWebSocket">Use WebSocket (Real-time Communication)</label>
+                    </div>
                 </div>
                 
                 <div class="mt-3 small text-muted text-center">
@@ -73,6 +78,7 @@
                     <li>Converts the response to speech for a natural conversation</li>
                     <li>Maintains conversation context for a coherent exchange</li>
                     <li>Allows you to interrupt the AI's response, just like in a real conversation</li>
+                    <li>Supports both HTTP and WebSocket communication for optimal performance</li>
                 </ul>
                 <p class="mb-0"><small class="text-muted">Note: An active internet connection is required. Your voice data is sent to OpenAI's servers for processing.</small></p>
             </div>
@@ -82,5 +88,6 @@
 {% endblock %}
 
 {% block extra_js %}
+<script src="{% static 'js/voiceai-websocket.js' %}"></script>
 <script src="{% static 'js/voiceai.js' %}"></script>
 {% endblock %}
