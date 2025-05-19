@@ -61,6 +61,9 @@ class VoiceAgent:
             #tools=[get_weather, get_datetime, calculate, set_reminder]
         )
         
+        # Initialize messages history format for OpenAI API
+        self.messages_by_conversation = {}
+        
         logger.info("VoiceAgent initialized with tools: Weather, DateTime, Calculator, Reminder")
     
     def process_message(self, message: str, conversation_id: Optional[str] = None) -> Dict[str, Any]:
@@ -87,6 +90,21 @@ class VoiceAgent:
         if not conversation_id:
             conversation_id = str(uuid.uuid4())
             logger.info(f"Generated new conversation ID: {conversation_id}")
+            # Initialize message history for new conversation
+            self.messages_by_conversation[conversation_id] = [
+                {"role": "system", "content": self.system_prompt}
+            ]
+        
+        # Ensure the conversation exists in our message history
+        if conversation_id not in self.messages_by_conversation:
+            self.messages_by_conversation[conversation_id] = [
+                {"role": "system", "content": self.system_prompt}
+            ]
+        
+        # Add the user message to history
+        self.messages_by_conversation[conversation_id].append(
+            {"role": "user", "content": message}
+        )
         
         # Get conversation history for context enhancement
         conversation_history = self._get_conversation_history(conversation_id)
@@ -110,15 +128,28 @@ class VoiceAgent:
             asyncio.set_event_loop(loop)
             
             try:
-                # Run the agent using the Runner class
+                # Create a temporary agent (without using messages parameter since it's not supported)
+                temp_agent = OpenAIAgent(
+                    name="Assistant",
+                    instructions=self.system_prompt,
+                    model="gpt-4o-mini",
+                    #tools=[get_weather, get_datetime, calculate, set_reminder]
+                )
+                
+                # Run the agent using the Runner class with the enhanced message that includes history
                 result = loop.run_until_complete(Runner.run(
-                    self.agent, 
-                    enhanced_message  # Use the enhanced message with context
+                    temp_agent, 
+                    enhanced_message  # Use enhanced message with conversation history
                 ))
                 response_text = result.final_output
                 logger.info(f"Agent response: '{response_text}'")
                 
-                # Update conversation history with this exchange
+                # Add the assistant's response to message history
+                self.messages_by_conversation[conversation_id].append(
+                    {"role": "assistant", "content": response_text}
+                )
+                
+                # Update conversation history with this exchange (keeping the old format for backward compatibility)
                 self._update_conversation_history(conversation_id, message, response_text)
                 
                 # Check for tool usage in the trace metadata if available

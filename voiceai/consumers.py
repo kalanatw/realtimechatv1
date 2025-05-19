@@ -281,6 +281,8 @@ class VoiceAIStreamConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         """Handle WebSocket connection."""
         logger.info("WebSocket connection established for streaming voice conversation")
+        # Initialize conversation tracking
+        self.current_conversation_id = None
         await self.accept()
 
     async def disconnect(self, close_code):
@@ -305,12 +307,15 @@ class VoiceAIStreamConsumer(AsyncWebsocketConsumer):
                     # Store metadata for use when processing audio
                     self.use_offline_tts = data.get('use_offline_tts', True)
                     self.tts_engine = data.get('tts_engine', 'kokoro')
-                    self.conversation_id = data.get('conversation_id')
+                    # Only update conversation_id if provided, otherwise keep existing
+                    if data.get('conversation_id'):
+                        self.current_conversation_id = data.get('conversation_id')
                     
-                    logger.info(f"WebSocket stream metadata received: TTS={self.tts_engine}, Offline={self.use_offline_tts}, ConvID={self.conversation_id}")
+                    logger.info(f"WebSocket stream metadata received: TTS={self.tts_engine}, Offline={self.use_offline_tts}, ConvID={self.current_conversation_id}")
                     await self.send(text_data=json.dumps({
                         'type': 'metadata_received',
-                        'success': True
+                        'success': True,
+                        'conversation_id': self.current_conversation_id
                     }))
                 
                 elif message_type == 'tts_request':
@@ -356,7 +361,13 @@ class VoiceAIStreamConsumer(AsyncWebsocketConsumer):
             # Get conversation context from instance variables or use defaults
             use_offline_tts = getattr(self, 'use_offline_tts', True)
             tts_engine = getattr(self, 'tts_engine', 'kokoro')
-            conversation_id = getattr(self, 'conversation_id', None)
+            conversation_id = getattr(self, 'current_conversation_id', None)
+            
+            # Log the current conversation context
+            if conversation_id:
+                logger.info(f"WEBSOCKET STREAM - Continuing conversation with ID: {conversation_id}")
+            else:
+                logger.info("WEBSOCKET STREAM - Starting new conversation (no ID provided)")
             
             # Create a ChunkedFile class like the one in VoiceAIConsumer
             class ChunkedFile:
@@ -395,7 +406,8 @@ class VoiceAIStreamConsumer(AsyncWebsocketConsumer):
             # Send transcription result immediately
             await self.send(text_data=json.dumps({
                 'type': 'transcription',
-                'text': transcribed_text
+                'text': transcribed_text,
+                'conversation_id': conversation_id
             }))
             
             # Generate response using the agent (run in thread pool)
@@ -404,6 +416,11 @@ class VoiceAIStreamConsumer(AsyncWebsocketConsumer):
                 transcribed_text,
                 conversation_id
             )
+            
+            # Update our conversation ID tracking
+            if new_conversation_id:
+                self.current_conversation_id = new_conversation_id
+                logger.info(f"WEBSOCKET STREAM - Updated conversation ID to: {new_conversation_id}")
             
             # Send the complete AI response as text
             await self.send(text_data=json.dumps({
@@ -575,3 +592,4 @@ class VoiceAIStreamConsumer(AsyncWebsocketConsumer):
             
         except Exception as e:
             logger.error(f"WEBSOCKET STREAM ERROR - Database error: {str(e)}")
+            raise
