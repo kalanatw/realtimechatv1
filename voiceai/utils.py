@@ -353,43 +353,123 @@ def text_to_speech_gtts(text):
         raise Exception(f"Error converting text to speech: {str(e)}")
 
 def split_text_into_sentences(text, max_length=100):
-    """Split text into manageable sentences for parallel processing"""
+    """
+    Split text into semantically balanced segments for optimal TTS processing.
+    This improved version creates more natural-sounding segments for Kokoro.
+    
+    Args:
+        text: The text to split
+        max_length: Maximum length for each segment
+        
+    Returns:
+        List of text segments ready for TTS processing
+    """
     import re
     
-    # First split by sentence-ending punctuation
-    sentences = re.split(r'(?<=[.!?])\s+', text)
+    # Step 1: First perform a rough split by clear sentence boundaries
+    # These are definite pauses in natural speech
+    sentence_boundaries = re.split(r'(?<=[.!?:])\s+', text)
     
-    # Further split long sentences
+    # Step 2: Process each rough sentence for better segmentation
     result = []
-    for sentence in sentences:
+    for sentence in sentence_boundaries:
+        # Skip empty sentences
+        if not sentence.strip():
+            continue
+            
+        # If sentence is short enough, keep it as-is
         if len(sentence) <= max_length:
             result.append(sentence)
-        else:
-            # Split by commas or other natural pauses
-            parts = re.split(r'(?<=[:;,])\s+', sentence)
-            for part in parts:
-                if len(part) <= max_length:
-                    result.append(part)
+            continue
+            
+        # Split longer sentences at natural pause points
+        # Order is important - split by strongest pauses first
+        pause_markers = [
+            r'(?<=;)\s+',      # semicolons (strongest pause)
+            r'(?<=—)\s+',      # em-dashes
+            r'(?<=-)\s+',      # regular dashes  
+            r'(?<=,)\s+',      # commas
+            r'(?<=\))\s+',     # closing parentheses
+            r'\s+(?=\()',      # opening parentheses
+            r'\s+(?=and)\s+',  # before "and"
+            r'\s+(?=but)\s+',  # before "but" 
+            r'\s+(?=or)\s+',   # before "or"
+            r'\s+(?=because)'  # before "because"
+        ]
+        
+        # Try each pause marker in sequence until we get segments of acceptable length
+        current_segments = [sentence]
+        for marker in pause_markers:
+            new_segments = []
+            for segment in current_segments:
+                if len(segment) <= max_length:
+                    # This segment is already good
+                    new_segments.append(segment)
                 else:
-                    # Break down by words if still too long
-                    words = part.split()
-                    current_chunk = []
-                    current_length = 0
-                    
-                    for word in words:
-                        if current_length + len(word) + 1 <= max_length:
-                            current_chunk.append(word)
-                            current_length += len(word) + 1
-                        else:
-                            if current_chunk:
-                                result.append(' '.join(current_chunk))
-                            current_chunk = [word]
-                            current_length = len(word)
-                    
-                    if current_chunk:
-                        result.append(' '.join(current_chunk))
+                    # Try to split at this marker
+                    parts = re.split(marker, segment)
+                    if len(parts) > 1:
+                        new_segments.extend(parts)
+                    else:
+                        # Couldn't split with this marker
+                        new_segments.append(segment)
+            
+            current_segments = new_segments
+            
+            # If all segments are now within the limit, we're done
+            if all(len(segment) <= max_length for segment in current_segments):
+                break
+        
+        # Step 3: For any remaining long segments, split by spacing between words
+        # trying to create balanced chunks instead of just cutting at max_length
+        final_segments = []
+        for segment in current_segments:
+            if len(segment) <= max_length:
+                final_segments.append(segment)
+            else:
+                words = segment.split()
+                current_chunk = []
+                current_length = 0
+                
+                for word in words:
+                    if current_length + len(word) + 1 <= max_length:
+                        current_chunk.append(word)
+                        current_length += len(word) + 1
+                    else:
+                        if current_chunk:
+                            final_segments.append(' '.join(current_chunk))
+                        current_chunk = [word]
+                        current_length = len(word)
+                
+                if current_chunk:
+                    final_segments.append(' '.join(current_chunk))
+        
+        # Add the processed segments for this sentence
+        result.extend(final_segments)
     
-    return result
+    # Step 4: Post-process segments to clean up and balance
+    balanced_result = []
+    
+    # Merge very short segments with neighbors if possible
+    i = 0
+    while i < len(result):
+        if i < len(result) - 1 and len(result[i]) + len(result[i+1]) + 1 <= max_length:
+            # Merge with next segment if combined length is within limit
+            balanced_result.append(f"{result[i]} {result[i+1]}")
+            i += 2
+        else:
+            balanced_result.append(result[i])
+            i += 1
+    
+    # Ensure each segment starts with a capital letter and ends with punctuation
+    # This helps Kokoro produce more natural prosody
+    for i, segment in enumerate(balanced_result):
+        # Add a period if there's no ending punctuation
+        if not re.search(r'[.!?:;,]$', segment):
+            balanced_result[i] = segment + '.'
+    
+    logger.info(f"Split text into {len(balanced_result)} optimized segments for TTS")
+    return balanced_result
 
 def process_text_segment(segment, voice='af_heart'):
     """Process a single text segment with Kokoro"""
@@ -429,7 +509,8 @@ def process_text_segment(segment, voice='af_heart'):
 
 def text_to_speech_kokoro(text):
     """
-    Convert text to speech using Kokoro TTS with optimized performance
+    Convert text to speech using Kokoro TTS with optimized performance.
+    Uses improved text segmentation for more natural-sounding speech.
     
     Args:
         text: The text to convert to speech
@@ -472,8 +553,9 @@ def text_to_speech_kokoro(text):
                 
                 return file_data
         
-        # Split text into smaller segments for parallel processing
-        segments = split_text_into_sentences(text)
+        # Split text into semantically balanced segments for natural speech
+        segments = split_text_into_sentences(text, max_length=150)
+        logger.info(f"PIPELINE LOG - STEP 3.3.2: Split into {len(segments)} optimized segments")
         
         # Process segments in parallel
         futures = []
@@ -488,13 +570,13 @@ def text_to_speech_kokoro(text):
                 audio = future.result(timeout=3.0)  # Add timeout to prevent hangs
                 if audio is not None:
                     all_audio.append(audio)
-                    logger.info(f"PIPELINE LOG - STEP 3.3.2: Generated segment {i}: '{segments[i][:30]}...'")
+                    logger.info(f"PIPELINE LOG - STEP 3.3.3: Generated segment {i}: '{segments[i][:30]}...'")
             except Exception as e:
                 logger.error(f"Error processing segment {i}: {str(e)}")
         
         # Check if we got any audio segments
         if not all_audio:
-            logger.warning("PIPELINE LOG - STEP 3.3.3: No audio generated by Kokoro, falling back to Google TTS")
+            logger.warning("PIPELINE LOG - STEP 3.3.4: No audio generated by Kokoro, falling back to Google TTS")
             return text_to_speech_gtts(text)
         
         # If we have multiple segments, concatenate them
@@ -521,7 +603,7 @@ def text_to_speech_kokoro(text):
                 kokoro_cache[cache_key] = final_audio
         
         file_size = len(audio_data)
-        logger.info(f"PIPELINE LOG - STEP 3.3.4: Memory audio buffer size: {file_size} bytes")
+        logger.info(f"PIPELINE LOG - STEP 3.3.5: Memory audio buffer size: {file_size} bytes")
         
         end_time = time.time()
         duration = round(end_time - start_time, 2)
@@ -536,7 +618,8 @@ def text_to_speech_kokoro(text):
 
 def text_to_speech_kokoro_stream(text):
     """
-    Convert text to speech using Kokoro TTS with streaming support
+    Convert text to speech using Kokoro TTS with streaming support.
+    Uses improved text segmentation for more natural-sounding speech.
     
     Args:
         text: The text to convert to speech
@@ -557,9 +640,9 @@ def text_to_speech_kokoro_stream(text):
                 yield None, None
                 return
                 
-        # Split text into smaller segments for faster processing
-        sentences = split_text_into_sentences(text)
-        logger.info(f"PIPELINE LOG - STREAM STEP 3.1: Split text into {len(sentences)} segments")
+        # Split text into balanced segments for more natural speech
+        sentences = split_text_into_sentences(text, max_length=150)  # Slightly longer max length for better phrases
+        logger.info(f"PIPELINE LOG - STREAM STEP 3.1: Split text into {len(sentences)} optimized segments")
         
         import soundfile as sf
         import io
@@ -588,7 +671,7 @@ def text_to_speech_kokoro_stream(text):
             
             # Not in cache, process with Kokoro
             try:
-                # Process segment
+                # Process segment with proper voice settings for natural sound
                 generator = kokoro_pipeline(segment, voice='af_heart')
                 for j, (gs, ps, audio) in enumerate(generator):
                     if audio is not None:
